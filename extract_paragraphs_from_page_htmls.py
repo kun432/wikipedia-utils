@@ -19,13 +19,32 @@ from unicodedata import normalize
 from bs4 import BeautifulSoup
 from logzero import logger
 from tqdm import tqdm
+import html2text
+import re
 
 
 DEFAULT_SECTIONS_TO_IGNORE = ["脚注", "出典", "参考文献", "関連項目", "外部リンク"]
-DEFAULT_TAGS_TO_REMOVE = ["table"]
-DEFAULT_TAGS_TO_EXTRACT = ["p"]
+#DEFAULT_TAGS_TO_REMOVE = ["table"]
+DEFAULT_TAGS_TO_REMOVE = [
+    ["div", {"class": "hatnote dablink noprint"}],
+    ["table", {"class": "box-馬齢新"}],
+    ["table", {"class": "box-馬齢旧"}],
+    ["table", {"class": "box-現役競走馬"}],
+    ["table", {"class": "infobox"}],
+    ["table", {"class": "navbox"}],
+    ["div", {"class": "navbox"}],
+]
+DEFAULT_TAGS_TO_EXTRACT = [
+    "p",
+    "dd",
+    "table",
+    "blockquote"
+]
 DEFAULT_INNER_TAGS_TO_REMOVE = ["sup"]
 
+text_maker = html2text.HTML2Text()
+text_maker.ignore_links = True
+text_maker.body_width = 0
 
 def normalize_text(text):
     text = normalize("NFKC", text)
@@ -34,6 +53,27 @@ def normalize_text(text):
     text = text.strip()
     return text
 
+def normalize_table_text(table_tag):
+    for cell in table_tag.find_all(['th', 'td']):
+        cell_text = cell.get_text(separator=' ')
+        normalized_cell_text = normalize("NFKC", cell_text)
+        cell.string = ' '.join(normalized_cell_text.split())
+    return table_tag
+
+def normalize_blood_table_text(table_tag):
+    csv_data = []
+    for tr in table_tag.find_all('tr'):
+        row = [td.get_text(separator=' ').replace('*','').strip() for td in tr.find_all(['td', 'th'])]
+        if any(row[0].startswith(keyword) for keyword in ['父 ','母 ', '父の', '母の']):
+            row[0] = re.sub(r'\s+', ': ', row[0], count=1)
+            csv_data.append(" - ".join(row))
+        elif any(row[0].startswith(keyword) for keyword in ['5代内']):
+            row[0] = row[0].replace(' ', '')
+            row[1] = re.sub(r'\s+', ' ', row[1])
+            csv_data.append(": ".join(row))
+        elif any(row[0].startswith(keyword) for keyword in ['母系']):
+            csv_data.append(": ".join(row))
+    return(normalize("NFKC", "\n".join(csv_data)))
 
 def extract_paragraphs_from_html(html, tags_to_extract, tags_to_remove, inner_tags_to_remove):
     soup = BeautifulSoup(html, features="lxml")
@@ -43,14 +83,29 @@ def extract_paragraphs_from_html(html, tags_to_extract, tags_to_remove, inner_ta
         if section.h2 is not None:
             section_title = section.h2.text
 
-        for tag in section.find_all(tags_to_remove):
-            tag.clear()
+        for tag in tags_to_remove:
+            if isinstance(tag,list):
+                for tag_to_remove in section.find_all(tag[0], tag[1]):
+                    tag_to_remove.clear()
+            else:
+                for tag_to_remove in section.find_all(tag):
+                    tag_to_remove.clear()
 
         for tag in section.find_all(tags_to_extract):
             for inner_tag in tag.find_all(inner_tags_to_remove):
                 inner_tag.clear()
 
-            paragraph_text = normalize_text(tag.text)
+            if tag and tag.name == 'table':
+                if section_title == "血統表":
+                    blood_table_text = normalize_blood_table_text(tag)
+                    paragraph_text = blood_table_text
+                else:
+                    tag = normalize_table_text(tag)
+                    md_text = text_maker.handle(str(tag))
+                    paragraph_text = md_text
+            else:
+                paragraph_text = normalize_text(tag.text)
+
             yield (section_title, paragraph_text, tag.name)
 
         section = section.find_next_sibling(["section"])

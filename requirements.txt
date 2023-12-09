@@ -8,3 +8,4 @@ lxml
 requests
 tqdm
 unidic_lite==1.0.8
+html2text
